@@ -6,13 +6,14 @@
 # every one of their revisions. The final table of contributors and 
 # scores is written to Postgres. 
 # Andrew Petersen
-# Oct. 2, 2020
+# Oct. 11, 2020
 # 
 #
 
 from __future__ import print_function
 
 import sys
+import os
 from operator import add
 
 from pyspark.sql import SparkSession
@@ -26,10 +27,13 @@ from pyspark.sql import functions as func
 from pyspark.sql import Window
 from pyspark.sql import SQLContext
 
+from ast import literal_eval
+
 #parameters to set
 region = 'us-west-1'
 bucket = 'petersen-insight-s3'
 key = 'supernova20200916.xml'
+#key = 'enwiki-20200401-pages-articles-multistream.xml'
 appName = "Petersen_XML_S3_Postgres_Testing"
 #master = "local" #add .master(master) after appName()?? #I think this is dealt with in the cmd line spark-submit call
 
@@ -55,8 +59,13 @@ if __name__ == "__main__":
         .option("rowTag","revision").load(s3file)
     #    .option("rowTag","revision").load(s3file, schema=schema)  # switch to include predefined schema
     df.show()
-    
+    print("df.dtypes: ",df.dtypes)
+
+    df = df.withColumn("isRegistered", when(func.length(col("contributor").username)!=0,True).otherwise(False))
+    df = df.withColumn("cleanContributor",when(col("isRegistered"),col("contributor").username).otherwise(col("contributor").ip))
+    df.show()
     # Convert Contributor column from type Struct to type String
+#    print("df.dtypes: ",df.dtypes)
     df = df.withColumn("contributor", func.col("contributor").cast("String"))
     print("df.dtypes: ",df.dtypes)
 
@@ -72,17 +81,22 @@ if __name__ == "__main__":
     scoreDf = df.withColumn("Score-Sum", func.sum("LiveSeconds").over(contributors)) \
               .withColumn("Score-Avg", func.avg("LiveSeconds").over(contributors)) \
               .withColumn("Score-Count", func.count("LiveSeconds").over(contributors)) \
-              .select("contributor","Score-Sum","Score-Avg","Score-Count").distinct()
+              .select("cleanContributor","Score-Sum","Score-Avg","Score-Count","isRegistered").distinct().orderBy("Score-Sum","Score-Avg","Score-Count","cleanContributor",ascending=False)
     totalRows = scoreDf.count()
     scoreDf.show(totalRows,truncate=False)
-    
+
+    # Simplify Contributor Column Format
+    #literal_eval()
+
     # Write output to Postgresql database
     url = 'jdbc:postgresql://10.0.0.11:5442/cluster_output'
-    properties = {"user":"*redacted*","password":"*redacted*","driver":"org.postgresql.Driver"}
-    scoreDf.write.jdbc(url=url, table="ContributorScores",properties=properties)
-    
+    postgresUser = os.environ['POSTGRES_USER']
+    postgresPass = os.environ['POSTGRES_PASS']
+    properties = {"user":postgresUser,"password":postgresPass,"driver":"org.postgresql.Driver"}
+    scoreDf.write.jdbc(url=url, table="ContributorScores",mode="overwrite",properties=properties)
+
     # Read from Postgresql database to confirm prior write
-    readSqlDf = spark.read.jdbc(url=url,table="ContributorScores",mode="overwrite",properties=properties) 
+    readSqlDf = spark.read.jdbc(url=url,table="ContributorScores",properties=properties) 
     readSqlDf.show(totalRows);
 
     spark.stop()

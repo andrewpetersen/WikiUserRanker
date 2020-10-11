@@ -1,4 +1,5 @@
-# WikiUserRanker
+# WikiRanks
+Identifying bad actors in the Wikipedia community.
 
 To make an open and collaborative project like Wikipedia work, the community needs to identify bad actors to prevent them from destructive behavior.
 

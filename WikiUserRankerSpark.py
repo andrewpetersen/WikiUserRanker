@@ -1,13 +1,12 @@
-#
-# ---WikiRanks---
-# This code reads hundreds of XML files of article revisions from Amazon S3, 
-# converts the XMLs to a dataframe with python-xml, cleans the data a bit, 
-# then matches each revision to time it was replaced by the next revision. 
+
+# ---WikiUserRanker---
+# This code reads parquet files of article revisions from Amazon S3,  
+# then matches each revision to the time it was replaced by the next revision. 
 # With this, a crude 'score' for every contributor based on the lifetime of 
 # their revisions is calculated. The final table of contributors and scores
-# is written to Postgres. 
+# is written to a Postgres database. 
 # Andrew Petersen
-# Oct. 15, 2020
+# Oct. 18, 2020
 # 
 #
 
@@ -34,12 +33,8 @@ from time import perf_counter,time
 region = 'us-west-1'
 bucket = 'petersen-insight-s3'
 dateOfDataDumpInEpochSeconds = 1602528423
-key = 'supernova20200916.xml'
 #dateOfSeconds = 1585766886
-#key = 'trwiki-latest-pages-meta-history.xml'
-#key = 'wiki/p11776p12543/enwiki-latest-pages-meta-history1.xml-p11776p12543_00018*'
-key = 'wiki/p11776p12543/enwiki-latest-pages-meta-history1.xml-p11776p12543_000*'
-#key = 'wiki/p11776p12543/enwiki-latest-pages-meta-history1.xml-p11776p12543_000249'
+rootList = ['wiki-parquet/p100/p110_','wiki-parquet/p117/p117_','wiki-parquet/p125/p125_','wiki-parquet/p134/p134_','wiki-parquet/p139/p139_']
 
 if __name__ == "__main__":
     tTotal = perf_counter()
@@ -49,15 +44,12 @@ if __name__ == "__main__":
     spark = SparkSession.builder\
                         .appName("WikiRanks")\
                         .getOrCreate()
-    spark.sparkContext.setLogLevel("WARN")   #Hide unnecessary status information from standard output
+    spark.sparkContext.setLogLevel("WARN")
     spark.sparkContext._jsc.hadoopConfiguration().set('fs.s3a.endpoint', f's3-{region}.amazonaws.com') #setup reading from AWS S3
-  #  sqlContext = SQLContext(sc)
     tSetupEnd = perf_counter()
 
     # Loading File Prep
     tLoadFile = perf_counter()
-    s3file = f's3a://{bucket}/{key}'
-
     schema = StructType([ # read per page
         StructField('ns',IntegerType(),True),
         StructField('id',IntegerType(),True),
@@ -72,22 +64,31 @@ if __name__ == "__main__":
         ])),True),
         StructField('title', StringType(),True)
     ])
+#            StructField('text',StructType(),True)
 
     # Load files from S3
-    df = spark.read.format("com.databricks.spark.xml") \
-        .option("rowTag","page").load(s3file,schema=schema)\
-        .filter((func.col("ns")==0))\
-        .repartition(500)
-    df.show()
+    for k in range(5):
+        parquetKeyRoot = rootList[k]
+        for i in range(10):
+            parquetKey = parquetKeyRoot + str(i)
+            s3ParquetFile = f's3a://{bucket}/{parquetKey}'
+            print(s3ParquetFile)
+            df2 = spark.read.parquet(s3ParquetFile)
+ #                      .filter(col("ns")==0)
+        #               .repartition(1000)
+    #    df.select("title","id","ns").show()
+            if i!=0:
+                df = df.union(df2)
+            else:
+                df = df2
     tLoadFileEnd = perf_counter()
-
-    df.printSchema()
-    print("df.dtypes: ",df.dtypes)
-
-    #Count the number of articles, by counting rows
-    numPgRows = df.count()
-    print("Number of Pages (Articles) = ",numPgRows)
     
+    df = df.filter(col("ns")==0).coalesce(1000)
+    #Count the number of articles, by counting rows
+#    numPgRows = df.select("id").count()
+#    print("Number of Pages (Articles) = ",numPgRows)
+    # Deal with timings
+
     # Table currently: 1 row = 1 article or page
     # Expand each row into many rows so that 1 row = 1 revision. Rename columns to prevent naming conflicts
     tExplodeData = perf_counter()
@@ -95,9 +96,9 @@ if __name__ == "__main__":
         .select("pageTitle", "pageID", "pageNS", "rev.*")\
         .select("pageTitle", "pageID","pageNS", col("id").alias("revisionID"), col("parentid").alias("revisionParentID"), col("timestamp"), col("contributor")) #, col("text"))
     tExplodeDataEnd = perf_counter()
-    numRev = df.count()
-    df.show()
-    print("Exploded Pages to Revisions\nNumber of Revisions: ",numRev)
+#    numRev = df.count()
+#    df.show()
+#    print("Exploded Pages to Revisions\nNumber of Revisions: ",numRev)
 #    df.show(numRev,truncate=False)
 
     # Clean user information, adding 2 columns: cleanContributor and isRegistered
@@ -105,7 +106,7 @@ if __name__ == "__main__":
     df = df.withColumn("isRegistered", when(func.length(col("contributor.username"))!=0,True).otherwise(False))
     df = df.withColumn("cleanContributor",when(col("isRegistered"),col("contributor").username).otherwise(col("contributor").ip))
     tCleanUsersEnd = perf_counter()
-    df.show()
+#    df.show()
     print("Cleaned user information")
 
     # Convert all timestamps to Unix Epoch Seconds, and remove old timestamp
@@ -113,7 +114,7 @@ if __name__ == "__main__":
     df = df.withColumn("EpochTimestampStart",func.to_timestamp("timestamp").cast("long"))
     dfScore = df.select("pageTitle","pageID","cleanContributor","revisionID","revisionParentID","EpochTimestampStart","isRegistered")
     tTimestampEnd = perf_counter()
-    dfScore.show()
+#    dfScore.show()
 
     # Write to Postgresql working database
    # tWriteDB = perf_counter()
@@ -131,23 +132,24 @@ if __name__ == "__main__":
     
     # Self-join to match every revision with the revision timestamp that replaced it
     tMatchRevs = perf_counter()
-    df3 = dfScore.select(col("pageID").alias("pageID2"),col("revisionParentID").alias("revisionID"),col("EpochTimestampStart").alias("EpochTimestampEnd"))
-    df3.show()
-    dfScore = dfScore.join(df3, (dfScore.pageID == df3.pageID2) & (dfScore.revisionID == df3.revisionID))
+#    df3 = dfScore.select(col("pageID").alias("pageID2"),col("revisionParentID").alias("revisionID"),col("EpochTimestampStart").alias("EpochTimestampEnd"))
+#    df3.show()
+#    dfScore = dfScore.join(df3, (dfScore.pageID == df3.pageID2) & (dfScore.revisionID == df3.revisionID))
     print("Joined!")
-    tMatchRevsEnd = perf_counter()
-    dfScore.show()
+#    dfScore.show()
 
     #Instead of a join, could use a window function with a lag on data sorted by timestamp after grouping by pageID
-#    window = Window.partitionBy("pageID").orderBy("EpochTimestampStart")
-#    dfScore = dfScore.withColumn("EpochTimestampEnd", func.lag(dfScore.EpochTimestampStart,-1).over(window))
+    window = Window.partitionBy("pageID").orderBy("EpochTimestampStart")
+    dfScore = dfScore.withColumn("EpochTimestampEnd", func.lag(dfScore.EpochTimestampStart,-1).over(window))
 #    dfScore.show()
+    print("Lag functioned!")
+    tMatchRevsEnd = perf_counter()
 
     # Subtract startTime from endTime to get lifeTime of each revision
     tScoring = perf_counter()
     dfScore = dfScore.withColumn("LiveSeconds", func.when(func.isnull(dfScore.EpochTimestampEnd - dfScore.EpochTimestampStart),dateOfDataDumpInEpochSeconds-dfScore.EpochTimestampStart).otherwise(dfScore.EpochTimestampEnd - dfScore.EpochTimestampStart))
-    dfScore.show()
-    print("Table with Lifetime Calcs ^^^")
+#    dfScore.show()
+#    print("Table with Lifetime Calcs ^^^")
     
     # Score each contributor based on the average and total life of their revisions
     contributors = Window.partitionBy("cleanContributor")
@@ -155,14 +157,14 @@ if __name__ == "__main__":
               .withColumn("Score-Avg", func.avg("LiveSeconds").over(contributors)) \
               .withColumn("Score-Count", func.count("LiveSeconds").over(contributors)) \
               .select("cleanContributor","Score-Sum","Score-Avg","Score-Count","isRegistered").distinct().orderBy("cleanContributor","Score-Sum","Score-Avg","Score-Count",ascending=False)
-    numContributors = outDf.count()
+#    numContributors = outDf.count()
     tScoringEnd = perf_counter()
 #    outDf.show(numContributors,truncate=False)
-    outDf.show()
-    print("Total number contributors: ",numContributors)
+#    outDf.show()
+#    print("Total number contributors: ",numContributors)
 
     # Write output to Postgresql database
-    dbTableName ="ContributorScores6"
+    dbTableName ="ContributorScores"
     tWriteDB = perf_counter()
     url = 'jdbc:postgresql://10.0.0.11:5442/cluster_output'
     postgresUser = os.environ['POSTGRES_USER']
@@ -175,6 +177,8 @@ if __name__ == "__main__":
     tReadDB = perf_counter()
     readSqlDf = spark.read.jdbc(url=url,table=dbTableName,properties=properties)
     readSqlDf.show()
+    contributorCount = readSqlDf.select("isRegistered").count()
+    print('Number of Users: ',contributorCount)
     tReadDBEnd = perf_counter()
 
     # Deal with timings
@@ -205,4 +209,3 @@ if __name__ == "__main__":
     print("ReadDBTime: ",ReadDBTime)
 
     spark.stop()
-

@@ -8,7 +8,7 @@
 # using AWS m5a.xlarge EC2 instances, reading from and writing to AWS S3.
 #
 # Andrew Petersen
-# Oct. 18, 2020
+# Oct. 20, 2020
 # 
 
 from __future__ import print_function
@@ -30,20 +30,21 @@ from pyspark.sql import SQLContext
 
 from time import perf_counter,time
 
-#parameters to set
+# Input parameters/S3 bucket region and name
 region = 'us-west-1'
 bucket = 'petersen-insight-s3'
+# Input file directories
 keyRoot = 'wiki/p11000p11775/enwiki-latest-pages-meta-history1.xml-p11000p11775_000'
 #keyRoot = 'wiki/p11776p12543/enwiki-latest-pages-meta-history1.xml-p11776p12543_000'
 #keyRoot = 'wiki/p12544p13473/enwiki-latest-pages-meta-history1.xml-p12544p13473_000'
 #keyRoot = 'wiki/p13474p13908/enwiki-latest-pages-meta-history1.xml-p13474p13908_000'
 #keyRoot = 'wiki/p13909p14560/enwiki-latest-pages-meta-history1.xml-p13909p14560_000'
+# Output file directories
 parquetKeyRoot = 'wiki-parquet/p110_'
 #parquetKeyRoot = 'wiki-parquet/p117_'
 #parquetKeyRoot = 'wiki-parquet/p125_'
 #parquetKeyRoot = 'wiki-parquet/p134_'
 #parquetKeyRoot = 'wiki-parquet/p139_'
-
 
 if __name__ == "__main__":
     tTotal = perf_counter()
@@ -75,8 +76,6 @@ if __name__ == "__main__":
         ])),True),
         StructField('title', StringType(),True)
     ])
-
-    
 
     for i in range(10): #breaks the group of files into about 10 even chunks
         # Load files from S3
